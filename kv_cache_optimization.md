@@ -140,29 +140,46 @@ Attention_weights = [0.2, 0.3, 0.3, 0.2]  ← 所有位置都有权重
 
 ## 优化核心机制
 
-### **为什么可以优化？**
+### **多层级的 KV Cache 复用**
 
-```mermaid
-graph TB
-    A["无向 Self-Attention"] --> B["User Tokens 彼此可见"]
-    B --> C["User 之间的 Attention 关系<br/>独立于 Target Item 的选择"]
-    C --> D["✅ User 粒度 KV Cache<br/>可以独立计算一次"]
-    
-    E["多个 Target Items<br/>需要排序"] --> F["不同的 Target Items<br/>只需与 User History 融合"]
-    F --> G["✅ KV Cache 可以<br/>广播到所有 Docs"]
-    
-    D --> H["效果：吞吐降幅<br/>从 40% → 6.8%"]
-    G --> H
+实际上，KV Cache 优化存在**三个层级**：
+
+```
+1️⃣ Item 内部：同个 Target Item 的多个属性 Token
+   └─ 这些 Token 之间做 Self-Attention
+   └─ KV Cache 在 Item 内部复用
+
+2️⃣ User 粒度：用户历史数据的 Token
+   └─ 所有 User Token 之间做 Self-Attention
+   └─ KV Cache 计算一次，后续复用
+
+3️⃣ Doc 粒度：多个 Target Item 与 User History 的融合
+   └─ 每个 Target Item 与所有 User Token 做 Attention
+   └─ 同一份 User KV Cache 广播给 N 个 Target Items
 ```
 
-### **注意力计算流程**
+### **不同层级的 KV Cache 节省**
 
 ```mermaid
 graph TB
-    subgraph User["User 粒度计算（共享）"]
-        U1["User_History_1"]
-        U2["User_History_2"]
-        U3["User_History_3"]
+    subgraph Item["Item 内部 Self-Attention"]
+        I1["Attr_1"]
+        I2["Attr_2"]
+        I3["Attr_3"]
+        
+        I1 --- I2
+        I2 --- I3
+        I1 --- I3
+        
+        style I1 fill:#ff99cc
+        style I2 fill:#ff99cc
+        style I3 fill:#ff99cc
+    end
+    
+    subgraph User["User 粒度 Self-Attention"]
+        U1["History_1"]
+        U2["History_2"]
+        U3["History_3"]
         
         U1 --- U2
         U2 --- U3
@@ -174,51 +191,79 @@ graph TB
     end
     
     subgraph Doc["Doc 粒度融合"]
-        T1["Target_1"]
-        T2["Target_2"]
-        T3["Target_3"]
+        T1["Target"]
         
         T1 --- U1
         T1 --- U2
         T1 --- U3
         
-        T2 --- U1
-        T2 --- U2
-        T2 --- U3
-        
-        T3 --- U1
-        T3 --- U2
-        T3 --- U3
-        
-        style T1 fill:#ff99cc
-        style T2 fill:#ff99cc
-        style T3 fill:#ff99cc
+        style T1 fill:#ffccaa
     end
     
-    Cache1["KV Cache<br/>复用"]
-    Cache2["KV Cache<br/>复用"]
-    Cache3["KV Cache<br/>复用"]
+    ItemKV["Item KV Cache<br/>复用于多层"]
+    UserKV["User KV Cache<br/>复用于 N 个 Items"]
     
-    U1 -.->|共享| Cache1
-    Cache1 -.->|广播| T1
-    Cache1 -.->|广播| T2
-    Cache1 -.->|广播| T3
+    Item --> ItemKV
+    User --> UserKV
+    UserKV -.->|广播| Doc
 ```
 
 ### **为什么这个优化有效？**
 
+原始问题：
 ```
-关键观察：
-├─ User Tokens 之间的相互关系（User 粒度 KV 计算）
-│  └─ 不依赖于具体选择了哪个 Target Item
-│
-├─ Target Item 与 User Tokens 的关系（Doc 粒度融合）
-│  └─ 只需要一次 Attention 计算
-│
-└─ 结论：
-   ├─ User 粒度的 KV Cache 可以重复使用 N 次（N 个 Target Items）
-   ├─ 减少了 N-1 次重复的 User Attention 计算
-   └─ 吞吐量大幅提升
+传统推理（每个 Target Item 都完整计算）：
+
+Target_1: 
+  ├─ Item_1 内部 Self-Attention (Attr_1-2-3 相互看)
+  ├─ User 内部 Self-Attention (History_1-2-...N 相互看)
+  └─ Target-User 融合 Attention
+
+Target_2:
+  ├─ Item_2 内部 Self-Attention (Attr_1-2-3 相互看) ❌ 重复
+  ├─ User 内部 Self-Attention (History_1-2-...N 相互看) ❌ 重复
+  └─ Target-User 融合 Attention
+
+Target_3:
+  ├─ Item_3 内部 Self-Attention (Attr_1-2-3 相互看) ❌ 重复
+  ├─ User 内部 Self-Attention (History_1-2-...N 相互看) ❌ 重复
+  └─ Target-User 融合 Attention
+```
+
+优化后：
+```
+共享计算（User KV Cache 在 Doc 层级复用）：
+
+User 粒度：
+  └─ User 内部 Self-Attention 计算一次 ✅
+
+N 个 Target Items:
+  ├─ Item_1~N 内部 Self-Attention（各自独立，不可复用）
+  └─ 共享 User KV Cache 做融合 ✅
+
+节省的计算：
+  └─ User Self-Attention: (N-1) 次 ✅
+```
+
+### **KV Cache 节省空间计算**
+
+```
+显存占用分析：
+
+传统方案（每个 Target Item 独立）：
+  KV_total = N × (KV_item + KV_user)
+  
+优化方案（User KV Cache 共享）：
+  KV_total = N × KV_item + KV_user
+  
+节省空间：
+  节省 = (N-1) × KV_user
+  
+示例（N=50）：
+  KV_user ≈ 1000 token × 768 dim × 8 bytes ≈ 6MB/层
+  50层模型：6MB × 50 = 300MB/请求
+  
+  节省显存 = (50-1) × 300MB = 14.7GB ✅
 ```
 
 ## 性能提升数据
