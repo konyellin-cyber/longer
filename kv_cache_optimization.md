@@ -73,25 +73,115 @@ sequenceDiagram
     Doc3->>Doc3: 3. Target3 + 用户KV<br/>计算 Attention
 ```
 
+## 什么是 Causal Mask？
+
+### **定义**
+Causal Mask（因果掩码）是一种**注意力掩码机制**，它限制每个位置的 token **只能看到当前位置及其之前的 token**，**看不到未来的 token**。
+
+这是为了**模拟自回归生成过程**（左到右的顺序生成），确保模型生成时不会"作弊"地看到未来信息。
+
+### **数学表示**
+
+对于一个长度为 N 的序列，Causal Mask 是一个 N×N 的矩阵：
+
+```
+     0    1    2    3    4
+0 [  1    0    0    0    0  ]  ← 位置0：只能看自己
+1 [  1    1    0    0    0  ]  ← 位置1：能看位置0、1
+2 [  1    1    1    0    0  ]  ← 位置2：能看位置0、1、2
+3 [  1    1    1    1    0  ]  ← 位置3：能看位置0、1、2、3
+4 [  1    1    1    1    1  ]  ← 位置4：能看所有前面的位置
+
+规则：mask[i][j] = 1 当 j ≤ i（j在i之前或相同位置）
+      mask[i][j] = 0 当 j > i（j在i之后）
+```
+
+### **在 Attention 中的应用**
+
+Self-Attention 计算公式：
+```
+Attention(Q, K, V) = softmax((Q·K^T / √d) + Mask) · V
+
+其中 Mask 将不应该看到的位置设为 -∞，经过 softmax 后变为 0
+```
+
+**具体例子**：
+
+```
+假设序列为：[Target_Item, History_1, History_2, History_3]
+                   0              1          2         3
+
+计算位置2的 Attention 时：
+Q2 = Query at position 2
+
+可见位置：
+  ✅ 位置0 (Target_Item)：可见
+  ✅ 位置1 (History_1)：可见
+  ✅ 位置2 (History_2)：可见（自己）
+  ❌ 位置3 (History_3)：看不见
+
+Attention_weights = [0.3, 0.3, 0.2, 0.0]  ← 位置3的权重被屏蔽为0
+```
+
+### **与标准 Attention 的区别**
+
+| 类型 | 可见范围 | 用途 | 例子 |
+|------|--------|------|------|
+| **无 Mask** | 看到所有位置 | 双向上下文 | BERT、分类任务 |
+| **Causal Mask** | 只看过去和现在 | 自回归生成 | GPT、翻译、推荐排序 |
+| **Seq2Seq Mask** | Encoder 无限制、Decoder 因果 | 序列到序列 | 机器翻译 |
+
+### **推荐系统中的 Causal Mask**
+
+在 LONGER 中的应用场景：
+
+```
+输入序列：[Target_Item, User_Click_1, User_Click_2, ..., User_Click_N]
+           位置 0          位置 1       位置 2        位置 N
+
+Causal Mask 的含义：
+├─ 位置0（Target_Item）：通常是预测目标，可以作为起点
+├─ 位置1~N（User历史）：这些位置按时间顺序排列
+│  
+└─ Mask 规则：确保按时间顺序处理用户历史
+   ✅ 位置2可以看：位置0、1、2（过去的行为）
+   ❌ 位置2看不到：位置3、4...（未来的行为）
+```
+
 ## 注意力计算细节
 
 ```mermaid
 graph LR
     subgraph "Causal Mask 结构"
-        A["Target Item<br/>位置 0"] -.->|不可见| B["User Token 1<br/>位置 1"]
-        B -.->|可见自己| B
-        B -.->|不可见| C["User Token 2<br/>位置 2"]
-        C -.->|可见前两个| A
-        C -.->|可见前两个| B
+        A["Target Item<br/>位置 0"] -.->|✅可见| B["User Token 1<br/>位置 1"]
+        B -.->|✅可见自己| B
+        B -.->|❌不可见| C["User Token 2<br/>位置 2"]
+        C -.->|✅可见前两个| A
+        C -.->|✅可见前两个| B
     end
     
     subgraph "优化利用点"
         D["User Token 1~N<br/>的 Attention 计算"]
         E["只需 User 粒度内的 tokens"]
         D --> E
-        E -->|"不依赖 Target Item"| F["可单独计算一次"]
+        E -->|"Target Item 不参与<br/>User之间的Attention"| F["可单独计算一次"]
         F -->|"广播复用"| G["多个 Doc 粒度<br/>的 Target Item"]
     end
+```
+
+### **为什么 Causal Mask 让优化成为可能？**
+
+```mermaid
+graph TB
+    A["Causal Mask 的限制"] --> B["每个 User Token 只能看<br/>前面的 User Tokens"]
+    B --> C["User Token 之间的 Attention<br/>不依赖 Target Item"]
+    C --> D["✅ 可以独立计算一次"]
+    
+    E["多个 Target Items<br/>共享用户历史"] --> F["不同的 Target Items<br/>只在最后一层做注意力融合"]
+    F --> G["✅ 可以广播复用<br/>User 粒度的 KV Cache"]
+    
+    D --> H["效果：吞吐降幅<br/>从 40% → 6.8%"]
+    G --> H
 ```
 
 ## 性能提升数据
