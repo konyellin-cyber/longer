@@ -102,28 +102,28 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph "请求到达"
-        A1["请求1<br/>序列长 500"]
-        A2["请求2<br/>序列长 300"]
-        A3["请求3<br/>序列长 200"]
+    subgraph A["请求到达"]
+        A1["请求1: 500 tokens"]
+        A2["请求2: 300 tokens"]
+        A3["请求3: 200 tokens"]
     end
     
-    subgraph "物理块分配"
+    subgraph B["物理块分配"]
         B1["块 1-32"]
         B2["块 33-51"]
         B3["块 52-63"]
     end
     
-    subgraph "逻辑到物理映射"
-        C1["请求1<br/>逻辑块: A,B,C,...]
-        C2["请求2<br/>逻辑块: X,Y,...]
-        C3["请求3<br/>逻辑块: P,Q,...]
+    subgraph C["逻辑到物理映射"]
+        C1["请求1: 逻辑块A,B,C"]
+        C2["请求2: 逻辑块X,Y"]
+        C3["请求3: 逻辑块P,Q"]
     end
     
-    subgraph "GPU 显存布局"
-        D["物理块池<br/>├─ 块 1-32 (请求1)
-        ├─ 块 33-51 (请求2)
-        └─ 块 52-63 (请求3)"]
+    subgraph D["GPU 显存布局"]
+        D1["块1-32: 请求1"]
+        D2["块33-51: 请求2"]
+        D3["块52-63: 请求3"]
     end
     
     A1 --> B1
@@ -134,11 +134,14 @@ graph TB
     B2 --> C2
     B3 --> C3
     
-    C1 --> D
-    C2 --> D
-    C3 --> D
+    C1 --> D1
+    C2 --> D2
+    C3 --> D3
     
     style D fill:#99ccff
+    style D1 fill:#99ccff
+    style D2 fill:#99ccff
+    style D3 fill:#99ccff
 ```
 
 ### **单个请求的推理步骤**
@@ -176,38 +179,46 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph "初始状态"
-        I1["K_cache shape: (50, 512, 768)<br/>当前位置: 512"]
-        I2["新 token 到达"]
+    subgraph A["初始状态"]
+        I1["K_cache shape: 50x512x768"]
+        I2["当前位置: 512"]
+        I3["新 token 到达"]
     end
     
-    subgraph "计算新 K, V"
+    subgraph B["计算新 K, V"]
         P1["新 token embedding"]
-        P1 --> P2["计算新 K<br/>shape: (1, 768)"]
-        P1 --> P3["计算新 V<br/>shape: (1, 768)"]
+        P2["计算新 K: shape 1x768"]
+        P3["计算新 V: shape 1x768"]
     end
     
-    subgraph "追加到 Cache"
-        U1["K_cache[layer, 512:513] = 新 K"]
-        U2["V_cache[layer, 512:513] = 新 V"]
+    subgraph C["追加到 Cache"]
+        U1["K_cache[512:513] = 新K"]
+        U2["V_cache[512:513] = 新V"]
         U3["cur_len = 513"]
     end
     
-    subgraph "更新完毕"
-        F1["K_cache shape: (50, 513, 768)<br/>当前位置: 513"]
+    subgraph D["更新完毕"]
+        F1["K_cache shape: 50x513x768"]
+        F2["当前位置: 513"]
     end
     
     I1 --> P1
     I2 --> P1
+    I3 --> P1
+    P1 --> P2
+    P1 --> P3
     P2 --> U1
     P3 --> U2
     U1 --> U3
     U2 --> U3
     U3 --> F1
+    U3 --> F2
     
     style U1 fill:#99ff99
     style U2 fill:#99ff99
     style U3 fill:#99ff99
+    style F1 fill:#99ff99
+    style F2 fill:#99ff99
 ```
 
 ### **完整推理循环的数据流**
@@ -259,21 +270,21 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph "基础计算单位"
-        A1["1 个位置 = 1 token"]
-        A2["1 个 K 向量 = hidden_dim × dtype_size"]
-        A3["1 个 V 向量 = hidden_dim × dtype_size"]
+    subgraph A["基础计算单位"]
+        A1["1个位置 = 1个token"]
+        A2["1个K向量 = hidden_dim x dtype_size"]
+        A3["1个V向量 = hidden_dim x dtype_size"]
     end
     
-    subgraph "单层计算"
-        B1["1 层 K 缓存 = seq_len × hidden_dim × dtype_size"]
-        B2["1 层 V 缓存 = seq_len × hidden_dim × dtype_size"]
-        B3["1 层 KV Cache = 2 × seq_len × hidden_dim × dtype_size"]
+    subgraph B["单层计算"]
+        B1["1层K缓存 = seq_len x hidden_dim x dtype"]
+        B2["1层V缓存 = seq_len x hidden_dim x dtype"]
+        B3["1层KV = 2 x seq_len x hidden_dim x dtype"]
     end
     
-    subgraph "多层/多请求"
-        C1["N 层 KV Cache = N × 2 × seq_len × hidden_dim × dtype_size"]
-        C2["M 请求 = M × (N × 2 × seq_len × hidden_dim × dtype_size)"]
+    subgraph C["多层/多请求"]
+        C1["N层KV = N x 2 x seq_len x hidden_dim x dtype"]
+        C2["M请求 = M x N x 2 x seq_len x hidden_dim x dtype"]
     end
     
     A1 --> B1
@@ -291,23 +302,26 @@ graph TB
 
 ```mermaid
 graph LR
-    subgraph "模型参数"
-        P1["hidden_dim = 4096"]
-        P2["num_layers = 32"]
-        P3["dtype = float16"]
-        P4["seq_len = 2048"]
+    subgraph A["模型参数"]
+        P1["hidden: 4096"]
+        P2["layers: 32"]
+        P3["dtype: fp16"]
+        P4["seq_len: 2048"]
     end
     
-    subgraph "计算过程"
-        C1["2 × seq_len × hidden_dim × num_layers × dtype_size"]
-        C1 --> C2["= 2 × 2048 × 4096 × 32 × 2 bytes"]
-        C2 --> C3["= 1 GB per request"]
+    subgraph B["计算过程"]
+        C1["2 x seq x hidden x layers x dtype"]
+        C2["= 2 x 2048 x 4096 x 32 x 2bytes"]
+        C3["= 1 GB per request"]
     end
     
     P1 --> C1
     P2 --> C1
     P3 --> C1
     P4 --> C1
+    
+    C1 --> C2
+    C2 --> C3
     
     style C3 fill:#99ff99
 ```
@@ -316,29 +330,35 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph "传统方案：独立 Cache"
+    subgraph A["传统方案"]
         T1["请求1: KV_user + KV_item1"]
         T2["请求2: KV_user + KV_item2"]
         T3["请求3: KV_user + KV_item3"]
-        T4["..."]
-        
-        T_total["总显存 = N × (KV_user + KV_item)"]
+        T_total["总 = N x KV_user + N x KV_item"]
     end
     
-    subgraph "优化方案：共享 User Cache"
-        O1["共享: KV_user（计算一次）"]
-        O2["请求1: KV_user + KV_item1"]
-        O3["请求2: KV_user + KV_item2"]
-        O4["请求3: KV_user + KV_item3"]
-        
-        O_total["总显存 = KV_user + N × KV_item"]
+    subgraph B["优化方案"]
+        O0["共享: KV_user"]
+        O1["请求1: KV_user + KV_item1"]
+        O2["请求2: KV_user + KV_item2"]
+        O3["请求3: KV_user + KV_item3"]
+        O_total["总 = KV_user + N x KV_item"]
     end
     
-    subgraph "节省计算"
-        S1["节省 = (N-1) × KV_user"]
-        S2["示例: N=50, KV_user≈100MB"]
-        S3["节省 = 49 × 100MB ≈ 4.9GB ✅"]
+    subgraph C["节省计算"]
+        S1["节省 = N-1 x KV_user"]
+        S2["例: N=50, KV_user=100MB"]
+        S3["节省 = 49 x 100MB = 4.9GB"]
     end
+    
+    T1 --> T_total
+    T2 --> T_total
+    T3 --> T_total
+    
+    O0 --> O1
+    O0 --> O2
+    O0 --> O3
+    O1 --> O_total
     
     T_total --> S1
     O_total --> S1
@@ -353,18 +373,18 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph "不同序列长度的影响"
-        L1["短序列<br/>L=100<br/>KV≈15MB"]
-        L2["中序列<br/>L=1000<br/>KV≈150MB"]
-        L3["长序列<br/>L=10000<br/>KV≈1.5GB"]
-        L4["超长序列<br/>L=100000<br/>KV≈15GB"]
+    subgraph A["不同序列长度"]
+        L1["短: L=100, KV=15MB"]
+        L2["中: L=1000, KV=150MB"]
+        L3["长: L=10000, KV=1.5GB"]
+        L4["超长: L=100k, KV=15GB"]
     end
     
-    subgraph "硬件容量匹配"
-        H1["GPU: 40GB<br/>✅ 支持中序列"]
-        H2["GPU: 80GB<br/>✅ 支持长序列"]
-        H3["CPU: 256GB<br/>⚠️ 需要 PCIe 传输"]
-        H4["SSD: 1TB<br/>⚠️ 需要预取策略"]
+    subgraph B["硬件容量匹配"]
+        H1["GPU 40GB: 支持中序列"]
+        H2["GPU 80GB: 支持长序列"]
+        H3["CPU 256GB: 需PCIe传输"]
+        H4["SSD 1TB: 需预取策略"]
     end
     
     L1 --> H1
@@ -385,22 +405,22 @@ graph TB
 
 ```mermaid
 graph LR
-    subgraph "无 KV Cache"
-        N1["内存占用<br/>序列长度 L<br/>O(L²)"]
-        N2["计算量<br/>每次都重算<br/>O(L²)"]
-        N3["推理速度<br/>随 L 线性恶化<br/>😞"]
+    subgraph A["无 KV Cache"]
+        N1["内存: O(L2)"]
+        N2["计算: O(L2)"]
+        N3["速度: 变慢"]
     end
     
-    subgraph "有 KV Cache"
-        Y1["内存占用<br/>序列长度 L<br/>O(L) 🎉"]
-        Y2["计算量<br/>仅新 token<br/>O(L) 🚀"]
-        Y3["推理速度<br/>恒定快速<br/>😊"]
+    subgraph B["有 KV Cache"]
+        Y1["内存: O(L)"]
+        Y2["计算: O(L)"]
+        Y3["速度: 恒快"]
     end
     
-    subgraph "改进倍数"
-        I1["内存节省<br/>50-80%"]
-        I2["计算加速<br/>5-100x"]
-        I3["延迟改进<br/>10-100x"]
+    subgraph C["改进倍数"]
+        I1["内存节省 50-80%"]
+        I2["计算加速 5-100x"]
+        I3["延迟改进 10-100x"]
     end
     
     N1 --> I1
@@ -422,22 +442,22 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph "无 KV Cache"
-        T1["序列长度 L=100: 100ms"]
-        T2["序列长度 L=1000: 1000ms"]
-        T3["序列长度 L=10000: 10000ms"]
+    subgraph A["无 KV Cache"]
+        T1["L=100: 100ms"]
+        T2["L=1000: 1000ms"]
+        T3["L=10000: 10000ms"]
     end
     
-    subgraph "有 KV Cache"
-        T4["序列长度 L=100: 10ms"]
-        T5["序列长度 L=1000: 10ms"]
-        T6["序列长度 L=10000: 10ms"]
+    subgraph B["有 KV Cache"]
+        T4["L=100: 10ms"]
+        T5["L=1000: 10ms"]
+        T6["L=10000: 10ms"]
     end
     
-    subgraph "加速比"
+    subgraph C["加速比"]
         S1["10x"]
-        S2["100x ⭐"]
-        S3["1000x ⭐⭐"]
+        S2["100x"]
+        S3["1000x"]
     end
     
     T1 --> S1
@@ -455,46 +475,57 @@ graph TB
 
 ```mermaid
 graph TB
-    A["是否使用 KV Cache?"]
+    A["使用 KV Cache?"]
     
-    A -->|需要序列生成?| B{是否逐步<br/>生成 token?}
+    A -->|需要逐步生成token| B{文本生成}
     
-    B -->|是<br/>文本生成| C["✅ 必须使用<br/>LLM、翻译、对话"]
-    B -->|是<br/>推荐排序| D["✅ 推荐使用<br/>LONGER 场景"]
+    B -->|是| C["✅ 必须使用"]
     
-    A -->|一次性推理?| E{需要批量<br/>处理?}
+    A -->|一次性推理| E{离线批处理}
     
-    E -->|否<br/>单个输入| F["❌ 不需要<br/>分类、检索"]
-    E -->|是<br/>离线处理| G["⚠️ 可选<br/>性能不如 KV Cache"]
+    E -->|是| F["❌ 不需要"]
+    E -->|否| G["⚠️ 可选"]
+    
+    C --> C1["LLM对话"]
+    C --> C2["翻译"]
+    C --> C3["推荐排序"]
+    
+    F --> F1["分类任务"]
+    G --> G1["检索任务"]
     
     style C fill:#99ff99
-    style D fill:#99ff99
     style F fill:#ff9999
+    style G fill:#ffcc99
 ```
 
 ### **KV Cache 的权衡**
 
 ```mermaid
 graph TB
-    subgraph "优势"
-        P1["✅ 减少冗余计算"]
-        P2["✅ 显存占用变线性"]
-        P3["✅ 推理延迟稳定"]
-        P4["✅ 吞吐量提升"]
+    subgraph A["优势"]
+        P1["减少冗余计算"]
+        P2["显存变线性"]
+        P3["推理延迟稳定"]
+        P4["吞吐量提升"]
     end
     
-    subgraph "代价"
-        N1["❌ 需要额外显存管理"]
-        N2["❌ 代码实现复杂"]
-        N3["❌ 不支持并行修改输入"]
-        N4["❌ 显存成为新瓶颈"]
+    subgraph B["代价"]
+        N1["需额外显存管理"]
+        N2["代码实现复杂"]
+        N3["不支持并行修改"]
+        N4["显存成为瓶颈"]
     end
     
-    subgraph "适用条件"
-        C1["✓ 显存 > 100GB"]
-        C2["✓ 序列长 > 500 tokens"]
-        C3["✓ 实时推理"]
+    subgraph C["适用条件"]
+        C1["显存 gt 100GB"]
+        C2["序列 gt 500 tokens"]
+        C3["实时推理"]
     end
+    
+    P1 --> C
+    P2 --> C
+    P3 --> C
+    P4 --> C
     
     style P1 fill:#99ff99
     style P2 fill:#99ff99
