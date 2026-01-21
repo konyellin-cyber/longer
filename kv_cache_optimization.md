@@ -158,46 +158,51 @@ graph TB
 ### **注意力计算流程**
 
 ```mermaid
-graph LR
-    subgraph "User 粒度计算"
+graph TB
+    subgraph User["User 粒度计算（共享）"]
         U1["User_History_1"]
         U2["User_History_2"]
         U3["User_History_3"]
         
-        U1 ←→ U2
-        U2 ←→ U3
-        U1 ←→ U3
+        U1 --- U2
+        U2 --- U3
+        U1 --- U3
         
         style U1 fill:#99ccff
         style U2 fill:#99ccff
         style U3 fill:#99ccff
     end
     
-    subgraph "Doc 粒度融合"
+    subgraph Doc["Doc 粒度融合"]
         T1["Target_1"]
         T2["Target_2"]
         T3["Target_3"]
         
-        T1 ←→ U1
-        T1 ←→ U2
-        T1 ←→ U3
+        T1 --- U1
+        T1 --- U2
+        T1 --- U3
         
-        T2 ←→ U1
-        T2 ←→ U2
-        T2 ←→ U3
+        T2 --- U1
+        T2 --- U2
+        T2 --- U3
         
-        T3 ←→ U1
-        T3 ←→ U2
-        T3 ←→ U3
+        T3 --- U1
+        T3 --- U2
+        T3 --- U3
         
         style T1 fill:#ff99cc
         style T2 fill:#ff99cc
         style T3 fill:#ff99cc
     end
     
-    U1 -.->|复用 KV| T1
-    U2 -.->|复用 KV| T2
-    U3 -.->|复用 KV| T3
+    Cache1["KV Cache<br/>复用"]
+    Cache2["KV Cache<br/>复用"]
+    Cache3["KV Cache<br/>复用"]
+    
+    U1 -.->|共享| Cache1
+    Cache1 -.->|广播| T1
+    Cache1 -.->|广播| T2
+    Cache1 -.->|广播| T3
 ```
 
 ### **为什么这个优化有效？**
