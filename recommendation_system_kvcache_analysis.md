@@ -132,6 +132,75 @@ KV Cache方案的计算：
 节省比例：(6.45M / 7.8M) × 100% ≈ 83%
 ```
 
+### Self-Attention中History序列的两两计算复用
+
+让我用一个视觉化的图表展示History序列内部的Self-Attention计算：
+
+```mermaid
+graph TB
+    subgraph History["User History: 256个token两两交互"]
+        H["History Self-Attention<br/>O(L²) = 256² ops<br/><br/>所有History Token间的交互都在这一步完成"]
+    end
+    
+    subgraph Item1["推理Item1"]
+        direction LR
+        H1["History KV<br/>已计算"]
+        Q1["Item1 Query<br/>新计算"]
+        Out1["Item1 Output"]
+        Q1 -->|只需交互| H1
+        H1 --> Out1
+    end
+    
+    subgraph Item2["推理Item2"]
+        direction LR
+        H2["History KV<br/>直接复用<br/>无需重算"]
+        Q2["Item2 Query<br/>新计算"]
+        Out2["Item2 Output"]
+        Q2 -->|只需交互| H2
+        H2 --> Out2
+    end
+    
+    subgraph Item3["推理Item3"]
+        direction LR
+        H3["History KV<br/>直接复用<br/>无需重算"]
+        Q3["Item3 Query<br/>新计算"]
+        Out3["Item3 Output"]
+        Q3 -->|只需交互| H3
+        H3 --> Out3
+    end
+    
+    H -->|计算一次| H1
+    H -->|复用缓存| H2
+    H -->|复用缓存| H3
+    
+    style H fill:#ffcccc,stroke:#cc0000,stroke-width:2px
+    style H1 fill:#ffffcc,stroke:#0000cc
+    style H2 fill:#ccffcc,stroke:#00aa00
+    style H3 fill:#ccffcc,stroke:#00aa00
+    style Out1 fill:#ffffcc,stroke:#0000cc
+    style Out2 fill:#ccffcc,stroke:#00aa00
+    style Out3 fill:#ccffcc,stroke:#00aa00
+```
+
+**关键洞察**：
+
+```
+User History中的Self-Attention计算（红色）：
+  ├─ History内部256个token的两两交互 O(L²) = 65k ops
+  ├─ 这个计算代价很高
+  └─ 但对所有Item都是相同的！
+
+对每个Item的推理（绿色/蓝色）：
+  ├─ Item Query与缓存的History KV交互 O(d×L) = 13k ops
+  ├─ 这个计算代价很低
+  └─ 每个Item都需要一次
+
+核心优势：
+  History内部的O(L²)计算被一次性完成
+  然后被复用N次，平均成本 = 65k / N + 13k
+  而合并方案需要重复N次，成本 = 65k + 13k
+```
+
 **这是核心差异**：
 - 合并方案：User计算被重复N次
 - Cache方案：User计算只进行1次，后续复用
