@@ -76,65 +76,59 @@ for item in items[1:]:
 
 ## 为什么不能直接合并？三个核心问题
 
-### 问题1：序列位置编码不一致
+### 问题1：Item间相互做Attention改变表示
 
-在Transformer模型中，Attention的计算依赖于**序列中的相对位置**。
+在推荐系统的Transformer模型中，Self-Attention不仅在User历史内部进行，**多个目标Item之间也会相互做Attention**。
 
 ```
-合并请求的问题：
-[User历史, Item1特征, Item2特征, Item3特征]
-            ↑位置p_1   ↑位置p_2   ↑位置p_3
+合并请求的序列结构和Attention模式：
+[User历史 token_1...token_L, Item1, Item2, Item3, ...]
 
-Item1的Attention计算：
-  Q_1 = Item1特征 + Position_Encoding(p_1)
-  Attention_1 = softmax(Q_1 @ K^T / √d)
+Self-Attention计算会产生：
 
-独立请求中：
-[User历史, Item1特征]
-            ↑位置p
+User历史内部：
+  token_i ← Attention ← token_1...token_L  ✓ 预期行为
 
-Item1的Attention计算：
-  Q_1 = Item1特征 + Position_Encoding(p)
-  Attention_1 = softmax(Q_1 @ K^T / √d)
+Item与User历史：
+  Item1 ← Attention ← User历史  ✓ 预期行为
+  Item2 ← Attention ← User历史  ✓ 预期行为
+  Item3 ← Attention ← User历史  ✓ 预期行为
 
-问题：p_1 ≠ p，导致Position Encoding不同！
-     → Item1在合并请求中的表征 ≠ 独立请求中的表征
-     → 推理结果可能不一致
+但同时也会产生不预期的交互：
+  Item1 ← Attention ← Item2, Item3  ❌ 不应该发生！
+  Item2 ← Attention ← Item1, Item3  ❌ 不应该发生！
+  Item3 ← Attention ← Item1, Item2  ❌ 不应该发生！
+  
+  User历史 token_i ← Attention ← Item1, Item2, Item3  ❌ 也不应该发生！
+```
+
+**为什么这是问题？**
+
+```
+独立请求中每个Item的表示：
+  Item1_representation = Attention(Item1, User历史)
+  Item2_representation = Attention(Item2, User历史)
+  Item3_representation = Attention(Item3, User历史)
+
+合并请求中每个Item的表示：
+  Item1_representation = Attention(Item1, [User历史, Item2, Item3])
+  Item2_representation = Attention(Item2, [User历史, Item1, Item3])
+  Item3_representation = Attention(Item3, [User历史, Item1, Item2])
+
+由于Attention中其他Item特征的存在，每个Item的最终表示**完全不同**！
+
+例子：
+- Item1在合并请求中会"看到"Item2和Item3的特征
+- 这会影响Item1对User历史的注意力分配
+- 最终导致Item1的预测分数与独立推理中的分数不同
 ```
 
 **实际影响**：
-- 不同的Position Encoding会改变Self-Attention的权重分布
-- 导致Item1在合并vs独立中的最终分数**可能完全不同**
-- 这违反了推荐系统的**核心原则：分数必须可比较**
+- 合并请求中的Item分数 ≠ 独立请求中的Item分数
+- 推荐排序结果会发生改变
+- 这违反了推荐系统的**核心原则：相同物品的分数应该一致**
 
-### 问题2：Item间的伪依赖关系
-
-```
-推荐排序系统的实际设计：
-
-for item in candidate_items:
-    score = rank_model(user_features, item_features)
-    if score > threshold:
-        add_to_result(item)
-
-这是一个串行循环结构，每个Item的推理应该是独立的。
-
-如果合并所有Item：
-all_scores = rank_model(user_features, all_items_features)
-
-问题：
-1. 引入了Item间的"看见"关系（Attention中）
-   Item1的分数计算时会看到Item2, Item3...
-   Item2的分数计算时也会看到Item1, Item3...
-   
-2. 这会改变Attention的计算方式：
-   本来每个Item是独立评估的
-   现在每个Item的评分受其他Item特征的影响
-   
-3. 推荐结果会发生偏移
-```
-
-### 问题3：显存和流水线的实际约束
+### 问题2：显存和流水线的实际约束
 
 ```
 场景：推荐系统需要对1个用户的100个候选Item进行排序
@@ -150,6 +144,10 @@ model_input = [user_history(256×768) + 100×items(50×768)]
 - 实际显存需求 ≈ 50-100MB
 
 而且这是单个用户的情况。实际推荐服务通常需要处理多个用户的请求。
+
+此外，Item间的Attention计算会显著增加复杂度：
+- 独立推理：只需计算User-Item的Attention O(L×d)
+- 合并推理：需要计算User-Item + Item-Item的Attention O((L+N×d)²)
 ```
 
 **流水线的破坏**：
@@ -166,8 +164,10 @@ model_input = [user_history(256×768) + 100×items(50×768)]
 用户B [Item1-100] ──┼→ GPU处理
 用户C [Item1-100] ──┘
 
-问题：必须等所有Item都准备好才能推理
-      如果某些Item的特征获取慢，整个链路都阻塞
+问题：
+1. 必须等所有Item都准备好才能推理
+2. 如果某些Item的特征获取慢，整个链路都阻塞
+3. 无法渐进式返回结果给用户
 ```
 
 ---
@@ -255,14 +255,21 @@ Batch 10: 推理Items [91-100]
 
 ```
 合并方案的风险：
-- 不同的Position Encoding
-- Item间存在伪Attention依赖
-- 推理结果与独立推理不可比
+- Item间会相互做Attention，改变每个Item的表示
+- 不同的Item组合会产生不同的分数
+- 推理结果与独立推理完全不同，无法直接比较
+
+示例：
+Item1在合并请求[User, Item1, Item2, Item3]中的分数 ≠
+Item1在独立请求[User, Item1]中的分数
+
+原因：合并请求中Item1看到了Item2和Item3的特征
 
 Cache方案：
 - 每次推理的逻辑完全相同
-- 用户A的Item1分数 ≈ 用户B的Item1分数（相同的推理路径）
-- 分数可直接用于排序
+- 所有Item都基于相同的User KV进行独立评估
+- Item1的分数 ≈ Item1的分数（无论何时推理）
+- 分数可直接用于排序，不受其他Item影响
 ```
 
 ### 2. 工程集成简单
