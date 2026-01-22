@@ -212,9 +212,32 @@ LONGER 是字节跳动在 2025 年提出的长序列建模方法，用于解决�
 
 ## 快速开始
 
+### 文档阅读顺序
+
+1. **[kv_cache_optimization.md](./kv_cache_optimization.md)** - 核心优化方案
+   - LONGER的多级KV Cache优化策略
+   - Target2和Target3的实现原理
+   - 性能数据和队列长度分析
+
+2. **[recommendation_system_kvcache_analysis.md](./recommendation_system_kvcache_analysis.md)** - 推荐系统设计选择
+   - 合并请求 vs KV Cache方案的对比分析
+   - 推荐系统中User重复计算的成本
+   - 5-6倍性能收益的详细计算
+   - 最佳实践和缓存管理策略
+
+3. **[kvcache_implementation.md](./kvcache_implementation.md)** - 理论基础
+   - KV Cache的基本原理
+   - 各框架的实现方式（vLLM, HuggingFace等）
+   - Mermaid流程图详解
+
+### 原始资源
+
 ```bash
 # 查看 KV Cache 优化方案详解
 cat kv_cache_optimization.md
+
+# 查看推荐系统中KV Cache的设计选择
+cat recommendation_system_kvcache_analysis.md
 
 # 查看原始技术文章解读
 # https://mp.weixin.qq.com/s/JFcV8zv1bYJUmQSvgCYqdQ
