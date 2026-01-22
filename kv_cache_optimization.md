@@ -140,29 +140,48 @@ Attention_weights = [0.2, 0.3, 0.3, 0.2]  ← 所有位置都有权重
 
 ## 优化核心机制
 
-### **多层级的 KV Cache 复用**
+### **多层级的 KV Cache 复用 - 真实价值分析**
 
-实际上，KV Cache 优化存在**三个层级**：
+实际上，KV Cache 优化存在**三个层级**，但真实的缓存价值差异很大：
 
 ```
 1️⃣ Item 内部：同个 Target Item 的多个属性 Token
-   └─ 这些 Token 之间做 Self-Attention
-   └─ KV Cache 在 Item 内部复用
-
-2️⃣ User 粒度：用户历史数据的 Token
-   └─ 所有 User Token 之间做 Self-Attention
-   └─ KV Cache 计算一次，后续复用
+   ├─ 这些 Token 之间做 Self-Attention: O(attr_num²)
+   ├─ KV Cache 在 Item 内部复用
+   └─ 缓存价值：中等 ✓
+   
+2️⃣ User 粒度：用户历史数据的 Token ← 主要收益！
+   ├─ 所有 User Token 之间做 Self-Attention: O(L²)
+   ├─ KV Cache 计算一次，后续复用
+   ├─ 被 N 个 Target Items 共享
+   └─ 缓存价值：**非常高** ✓✓✓
 
 3️⃣ Doc 粒度：多个 Target Item 与 User History 的融合
-   └─ 每个 Target Item 与所有 User Token 做 Attention
-   └─ 同一份 User KV Cache 广播给 N 个 Target Items
+   ├─ 每个 Target Item 与所有 User Token 做交互: O(d × L)
+   ├─ Item间的计算完全不同，无法复用
+   ├─ Target_1 + User KV ≠ Target_2 + User KV（内积结果不同）
+   └─ 缓存价值：**几乎没有** ✗
 ```
 
-### **不同层级的 KV Cache 节省**
+**关键澄清**：
+```
+Doc 粒度的"复用"并不是指Item间有重复计算。
+而是指多个Item都使用同一份 User KV Cache。
+
+这不同于计算复用，而是数据复用：
+- Item1 使用 User KV Cache
+- Item2 使用 Item1 计算过的同一份 User KV Cache（只需加载，无需重新计算）
+- Item3 使用 同一份 User KV Cache
+
+每个Item的推理过程：Target_i @ User_KV（内积）都是新的计算，
+但 User_KV 本身只需计算一次。
+```
+
+### **不同层级的 KV Cache 节省 - 价值分析**
 
 ```mermaid
 graph TB
-    subgraph Item["Item 内部 Self-Attention"]
+    subgraph Item["Item 内部 Self-Attention<br/>计算量: O(attr²)<br/>缓存价值: 中等 ⚠️"]
         I1["Attr_1"]
         I2["Attr_2"]
         I3["Attr_3"]
@@ -171,78 +190,107 @@ graph TB
         I2 --- I3
         I1 --- I3
         
-        style I1 fill:#ff99cc
-        style I2 fill:#ff99cc
-        style I3 fill:#ff99cc
+        style I1 fill:#ffccaa
+        style I2 fill:#ffccaa
+        style I3 fill:#ffccaa
     end
     
-    subgraph User["User 粒度 Self-Attention"]
+    subgraph User["User 粒度 Self-Attention<br/>计算量: O(L²)<br/>缓存价值: 极高 ✅✅✅"]
         U1["History_1"]
         U2["History_2"]
-        U3["History_3"]
+        U3["History_..."]
         
         U1 --- U2
         U2 --- U3
         U1 --- U3
         
-        style U1 fill:#99ccff
-        style U2 fill:#99ccff
-        style U3 fill:#99ccff
+        style U1 fill:#99ff99
+        style U2 fill:#99ff99
+        style U3 fill:#99ff99
     end
     
-    subgraph Doc["Doc 粒度融合"]
-        T1["Target"]
-        
-        T1 --- U1
-        T1 --- U2
-        T1 --- U3
-        
-        style T1 fill:#ffccaa
+    subgraph Doc1["Target_1 融合<br/>计算量: O(d×L)<br/>无法复用"]
+        T1["Target_1 @ User_KV"]
+        style T1 fill:#ff9999
     end
     
-    ItemKV["Item KV Cache<br/>复用于多层"]
-    UserKV["User KV Cache<br/>复用于 N 个 Items"]
+    subgraph Doc2["Target_2 融合<br/>计算量: O(d×L)<br/>无法复用"]
+        T2["Target_2 @ User_KV<br/>只加载缓存，计算不同"]
+        style T2 fill:#ff9999
+    end
     
-    Item --> ItemKV
+    subgraph Doc3["Target_3 融合<br/>计算量: O(d×L)<br/>无法复用"]
+        T3["Target_3 @ User_KV<br/>只加载缓存，计算不同"]
+        style T3 fill:#ff9999
+    end
+    
+    UserKV["User KV Cache<br/>计算1次，被N个Items加载"]
+    
     User --> UserKV
-    UserKV -.->|广播| Doc
+    UserKV -->|加载| Doc1
+    UserKV -->|加载| Doc2
+    UserKV -->|加载| Doc3
+    
+    Item -.->|独立计算| Doc1
+    Item -.->|独立计算| Doc2
+    Item -.->|独立计算| Doc3
 ```
 
 ### **为什么这个优化有效？**
 
-原始问题：
+**核心洞察**：User粒度的Self-Attention计算是最昂贵的，且被重复计算了N次。
+
 ```
 传统推理（每个 Target Item 都完整计算）：
 
 Target_1: 
-  ├─ Item_1 内部 Self-Attention (Attr_1-2-3 相互看)
-  ├─ User 内部 Self-Attention (History_1-2-...N 相互看)
-  └─ Target-User 融合 Attention
+  ├─ Item_1 内部 Self-Attention (Attr_1-2-3 相互看) O(attr²)
+  ├─ User 内部 Self-Attention (History_1-2-...L 相互看) O(L²) ← 重复1
+  └─ Target_1 与 User 的交互 (内积) O(d×L)
 
 Target_2:
-  ├─ Item_2 内部 Self-Attention (Attr_1-2-3 相互看) ❌ 重复
-  ├─ User 内部 Self-Attention (History_1-2-...N 相互看) ❌ 重复
-  └─ Target-User 融合 Attention
+  ├─ Item_2 内部 Self-Attention (Attr_1-2-3 相互看) O(attr²) ← 不同Item，重复但值不同
+  ├─ User 内部 Self-Attention (History_1-2-...L 相互看) O(L²) ← 重复2 ❌ 完全相同！
+  └─ Target_2 与 User 的交互 (内积) O(d×L) ← 不同Item，计算不同
 
 Target_3:
-  ├─ Item_3 内部 Self-Attention (Attr_1-2-3 相互看) ❌ 重复
-  ├─ User 内部 Self-Attention (History_1-2-...N 相互看) ❌ 重复
-  └─ Target-User 融合 Attention
+  ├─ Item_3 内部 Self-Attention (Attr_1-2-3 相互看) O(attr²) ← 不同Item，重复但值不同
+  ├─ User 内部 Self-Attention (History_1-2-...L 相互看) O(L²) ← 重复3 ❌ 完全相同！
+  └─ Target_3 与 User 的交互 (内积) O(d×L) ← 不同Item，计算不同
 ```
 
-优化后：
+**优化策略**：只缓存User粒度的计算
+
 ```
-共享计算（User KV Cache 在 Doc 层级复用）：
+优化后的推理：
 
-User 粒度：
-  └─ User 内部 Self-Attention 计算一次 ✅
+User 粒度（执行一次）：
+  └─ User 内部 Self-Attention 计算一次 O(L²) ✅ 保存KV Cache
 
-N 个 Target Items:
-  ├─ Item_1~N 内部 Self-Attention（各自独立，不可复用）
-  └─ 共享 User KV Cache 做融合 ✅
+N 个 Target Items（独立推理）:
+  ├─ Item_1~N 内部 Self-Attention（各自独立，无法复用）O(attr²) 
+  └─ 共享 User KV Cache 做融合（加载缓存 + 内积）O(d×L)
 
 节省的计算：
-  └─ User Self-Attention: (N-1) 次 ✅
+  └─ User Self-Attention: (N-1) 次 O(L²) ✅
+  └─ 这是主要收益！
+```
+
+**成本对比**：
+
+假设 L=256（User历史长度），d=50（Item特征维度），N=50（候选Item数）
+
+```
+传统方案的User Attention计算：
+  N × O(L²) = 50 × 256² ≈ 50 × 65k = 3.25M ops
+
+优化方案的User Attention计算：
+  1 × O(L²) = 1 × 256² ≈ 65k ops
+
+节省：3.25M - 65k ≈ 3.18M ops
+节省比例：（3.18M / 3.25M）× 100% ≈ 98%
+
+这才是KV Cache在推荐系统中的真实价值！
 ```
 
 ### **KV Cache 节省空间计算**
